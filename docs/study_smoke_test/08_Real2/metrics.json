@@ -1,0 +1,75 @@
+{
+  "image": {
+    "id": 8,
+    "filename": "Real2.jpg",
+    "label": "real"
+  },
+  "image_size": [
+    256,
+    256
+  ],
+  "raw": {
+    "eyes_pupils": {
+      "laplacian_variance": 5706.052570335408,
+      "hf_energy": 0.012248443315507417,
+      "ela_intensity": 0.6238938053097345
+    },
+    "eyebrows_eyelashes": {
+      "laplacian_variance": 8329.072649718932,
+      "hf_energy": 0.05882729813615566,
+      "ela_intensity": 0.7063339731285988
+    },
+    "mouth_teeth": {
+      "laplacian_variance": 7029.91386550979,
+      "hf_energy": 0.014572577979114688,
+      "ela_intensity": 0.8034825870646766
+    },
+    "skin_texture": {
+      "laplacian_variance": 2205.4862131971972,
+      "hf_energy": 0.007019600380721589,
+      "ela_intensity": 0.23441021788129227
+    },
+    "hairline_ears": {
+      "laplacian_variance": 729.6819803268479,
+      "hf_energy": 0.032699675652094265,
+      "ela_intensity": 0.24331861491982337
+    },
+    "facial_boundaries": {
+      "laplacian_variance": 411.22948054971937,
+      "hf_energy": 0.012703224802922946,
+      "ela_intensity": 0.33478857427965575
+    }
+  },
+  "z_scores": {
+    "eyes_pupils": {
+      "laplacian_variance": 0.6463288664403741,
+      "hf_energy": -1.0414929246468092,
+      "ela_intensity": -0.1918331151409613
+    },
+    "eyebrows_eyelashes": {
+      "laplacian_variance": 0.4457614480066454,
+      "hf_energy": 0.722258447264668,
+      "ela_intensity": 2.114438126013915
+    },
+    "mouth_teeth": {
+      "laplacian_variance": -0.007000171021437101,
+      "hf_energy": -0.6282278809848564,
+      "ela_intensity": 0.23293352075755264
+    },
+    "skin_texture": {
+      "laplacian_variance": -0.29967894690766056,
+      "hf_energy": 1.842399485407459,
+      "ela_intensity": 0.14328547060434527
+    },
+    "hairline_ears": {
+      "laplacian_variance": -1.183530667185452,
+      "hf_energy": 0.7323117733731592,
+      "ela_intensity": -0.3177303856082795
+    },
+    "facial_boundaries": {
+      "laplacian_variance": -1.2963720958266156,
+      "hf_energy": 0.9159534039578785,
+      "ela_intensity": 0.04501593143194853
+    }
+  }
+}

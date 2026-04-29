@@ -50,6 +50,14 @@ class StudyExplanation(BaseModel):
     summary: str
     detailed_analysis: str
     technical_notes: str | None = None
+    # Flat region label → observation map, kept for backwards compatibility
+    # with consumers written before the structured-output schema landed.
+    region_comments: dict | None = None
+    # Per-claim records with evidence_type ∈ visual / metric / heatmap, an
+    # evidence_ref naming the cited cue, and a confidence in [0, 1]. Surfaced
+    # so the frontend can highlight the specific metric / region a claim
+    # cites, and so the smoke-test validator can verify grounding.
+    structured_regions: list[dict] | None = None
     processing_time_ms: int
     error: str | None = None
 
@@ -59,6 +67,9 @@ class StudyAnalysisResponse(BaseModel):
     classification: str
     confidence: float
     gradcam_url: str | None = None
+    ela_url: str | None = None
+    evidence_regions: list[dict] | None = None
+    forensics_report: dict | None = None
     explanations: dict[str, StudyExplanation]
 
 
@@ -95,8 +106,18 @@ async def _run_vlm_provider(
     heatmap_available: bool,
     detection_context,
     img_id: str,
+    region_image_bytes: list[bytes] | None = None,
+    ela_bytes: bytes | None = None,
 ) -> tuple[str, dict]:
-    """Run a single VLM provider and return (provider_id, result_dict)."""
+    """Run a single VLM provider and return (provider_id, result_dict).
+
+    Mirrors the grounded pipeline call used by ``/api/v1/analyses/`` so the
+    VLM receives the same evidence package the live single-image endpoint
+    sends: original image, GradCAM overlay, ELA overlay, region crops,
+    forensics report on the DetectionContext. The structured per-claim
+    records are surfaced under ``structured_regions`` so the precomputed
+    JSON contains the full evidence trail for the frontend.
+    """
     try:
         vlm_result = await vlm_factory.generate_explanation(
             provider_id=provider_id,
@@ -104,6 +125,8 @@ async def _run_vlm_provider(
             heatmap_bytes=heatmap_bytes if heatmap_available else image_bytes,
             detection=detection_context,
             gradcam_available=heatmap_available,
+            region_image_bytes=region_image_bytes,
+            ela_bytes=ela_bytes,
         )
         return provider_id, {
             "provider": vlm_result.provider,
@@ -111,6 +134,8 @@ async def _run_vlm_provider(
             "summary": vlm_result.summary,
             "detailed_analysis": vlm_result.detailed_analysis,
             "technical_notes": vlm_result.technical_notes,
+            "region_comments": vlm_result.region_comments,
+            "structured_regions": vlm_result.structured_regions,
             "processing_time_ms": vlm_result.processing_time_ms,
             "error": None,
         }
@@ -122,6 +147,8 @@ async def _run_vlm_provider(
             "summary": "Explanation unavailable for this provider.",
             "detailed_analysis": "This provider could not generate an explanation.",
             "technical_notes": None,
+            "region_comments": None,
+            "structured_regions": None,
             "processing_time_ms": 0,
             "error": str(exc),
         }
@@ -137,6 +164,12 @@ async def analyze_for_study(file: UploadFile = File(...)):
     """
     Run deepfake detection + GradCAM + all VLM providers in parallel.
     Used by the user study Phase 2 to generate the three anonymised explanations.
+
+    NOTE: This endpoint still uses the pre-grounding pipeline (no forensics,
+    no ELA overlay, no structured-output capture). The user study runs off
+    precomputed JSON via ``/study/precompute`` so this is non-blocking, but
+    if the live path is ever used in production it should mirror the
+    grounded pipeline below. Tracked as a follow-up after the smoke-test PR.
     """
     import torch
     from PIL import Image
@@ -270,13 +303,16 @@ async def precompute_study_analyses():
         class_names,
         device,
         face_category_mapper,
+        face_parser,
         model,
         transform,
         vlm_factory,
     )
-    from app.routers.analyses import _run_gradcam
+    from app.routers.analyses import _build_ranked_evidence, _run_gradcam
     from app.services.categories import FACE_CATEGORIES
+    from app.services.forensics.ela import compute_ela, create_ela_overlay
     from app.services.vlm import DetectionContext
+    from app.services.vlm.base import RegionWithCategory
 
     if model is None:
         raise HTTPException(status_code=503, detail="Detection model not loaded")
@@ -310,8 +346,17 @@ async def precompute_study_analyses():
             target_class = int(predicted.item())
             classification = prediction if prediction in ("fake", "real") else "uncertain"
 
-            _, heatmap_bytes, _, evidence_regions, crops = _run_gradcam(
-                image, image_tensor, target_class
+            # Detect face bbox before GradCAM so background activations can
+            # be masked out. Falls back gracefully if no face is detected.
+            face_bbox = None
+            if face_category_mapper is not None:
+                try:
+                    face_bbox = face_category_mapper.detect_face_bbox(image)
+                except Exception as exc:
+                    logger.warning("Face bbox detection failed for %s: %s", img_id, exc)
+
+            heatmap, heatmap_bytes, _, evidence_regions, crops = _run_gradcam(
+                image, image_tensor, target_class, face_bbox=face_bbox
             )
 
             heatmap_public_url: str | None = None
@@ -320,11 +365,30 @@ async def precompute_study_analyses():
                 (heatmaps_dir / heatmap_filename).write_bytes(heatmap_bytes)
                 heatmap_public_url = f"/quiz-heatmaps/{heatmap_filename}"
 
-            region_labels = [r["label"] for r in evidence_regions] if evidence_regions else []
-            region_categories = []
-            if face_category_mapper is not None and crops:
+            # Run BiSeNet face parsing — shared by ranker + legacy mapper.
+            parsing_result = None
+            if face_parser is not None:
                 try:
-                    categorized = face_category_mapper.map_regions(image, crops)
+                    parsing_result = face_parser.parse(image)
+                except Exception as exc:
+                    logger.warning("Face parsing failed for %s: %s", img_id, exc)
+
+            # Preferred path: ranker fuses CAM attention with forensic z-scores.
+            # Falls back to legacy CAM-only crops if parsing/ranking fails.
+            ranker_used = False
+            region_categories: list[RegionWithCategory] = []
+            forensics_report = None
+            if parsing_result is not None and heatmap is not None:
+                ranked = _build_ranked_evidence(image, heatmap, parsing_result, face_bbox=face_bbox)
+                if ranked is not None:
+                    evidence_regions, crops, forensics_report = ranked
+                    ranker_used = True
+
+            if not ranker_used and face_category_mapper is not None and crops:
+                try:
+                    categorized = face_category_mapper.map_regions(
+                        image, crops, parsing_result=parsing_result
+                    )
                     region_categories = [r.to_region_with_category() for r in categorized]
                     for ev_region, cat in zip(evidence_regions, categorized, strict=True):
                         ev_region["category_id"] = cat.category_id
@@ -336,6 +400,46 @@ async def precompute_study_analyses():
                 except Exception as exc:
                     logger.warning("Face category mapping failed for %s: %s", img_id, exc)
 
+            # When the ranker produced evidence, rebuild region_categories from
+            # its output so the VLM prompt still gets the category context.
+            if ranker_used:
+                for ev_region in evidence_regions:
+                    cat_id = ev_region.get("category_id")
+                    face_cat = FACE_CATEGORIES.get(cat_id) if cat_id else None
+                    if face_cat is not None:
+                        region_categories.append(
+                            RegionWithCategory(
+                                label=face_cat.label,
+                                category_id=face_cat.id,
+                                category_label=face_cat.label,
+                                common_artifacts=face_cat.common_artifacts[:3],
+                                activation_score=float(
+                                    ev_region.get("suspicion_score")
+                                    or ev_region.get("activation_score")
+                                    or 0.0
+                                ),
+                            )
+                        )
+
+            # Build the ELA overlay once per image and persist it next to the
+            # GradCAM so the frontend can render the same evidence package.
+            ela_bytes = None
+            ela_public_url = None
+            if forensics_report is not None:
+                try:
+                    ela_map = compute_ela(image, quality=95, scale=10)
+                    ela_overlay = create_ela_overlay(image, ela_map)
+                    buf = io.BytesIO()
+                    ela_overlay.save(buf, format="PNG")
+                    ela_bytes = buf.getvalue()
+                    ela_filename = f"ela_{img_id}.png"
+                    (heatmaps_dir / ela_filename).write_bytes(ela_bytes)
+                    ela_public_url = f"/quiz-heatmaps/{ela_filename}"
+                except Exception as exc:
+                    logger.warning("ELA overlay generation failed for %s: %s", img_id, exc)
+
+            region_labels = [r["label"] for r in evidence_regions] if evidence_regions else []
+
             detection_context = DetectionContext(
                 classification=prediction,
                 confidence=confidence_value,
@@ -343,7 +447,15 @@ async def precompute_study_analyses():
                 probabilities={"fake": fake_prob, "real": real_prob},
                 region_labels=region_labels,
                 region_categories=region_categories,
+                forensics_report=forensics_report,
             )
+
+            # Convert region crop PIL images to JPEG bytes for the VLM.
+            region_image_bytes: list[bytes] = []
+            for crop in crops:
+                buf = io.BytesIO()
+                crop["image"].save(buf, format="JPEG", quality=90)
+                region_image_bytes.append(buf.getvalue())
 
             if vlm_factory is not None:
                 raw_results = await asyncio.gather(
@@ -356,6 +468,8 @@ async def precompute_study_analyses():
                             heatmap_public_url is not None,
                             detection_context,
                             img_id,
+                            region_image_bytes=region_image_bytes or None,
+                            ela_bytes=ela_bytes,
                         )
                         for p in providers
                     ]
@@ -369,6 +483,8 @@ async def precompute_study_analyses():
                         "summary": "VLM not configured.",
                         "detailed_analysis": "No API keys set.",
                         "technical_notes": None,
+                        "region_comments": None,
+                        "structured_regions": None,
                         "processing_time_ms": 0,
                         "error": None,
                     }
@@ -380,6 +496,11 @@ async def precompute_study_analyses():
                 "classification": classification,
                 "confidence": round(confidence_value, 4),
                 "gradcam_url": heatmap_public_url,
+                "ela_url": ela_public_url,
+                "evidence_regions": evidence_regions,
+                "forensics_report": (
+                    forensics_report.to_dict() if forensics_report is not None else None
+                ),
                 "explanations": explanations,
             }
 
