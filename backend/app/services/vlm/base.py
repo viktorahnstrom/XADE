@@ -69,12 +69,18 @@ class RegionWithCategory:
         category_label: Human-readable display label (e.g. "Eyes & Pupils").
         common_artifacts: First N artifact descriptions from the FaceCategory,
             used as guidance hints in VLM prompts.
+        activation_score: Region's relative importance from the saliency or
+            ranker pipeline — peak GradCAM activation for the legacy mapper
+            path, or the fused suspicion score for the ranker path. The
+            rule-based provider sorts on this to surface the strongest
+            region first; a 0.0 default keeps older builders working.
     """
 
     label: str
     category_id: str
     category_label: str
     common_artifacts: tuple[str, ...]
+    activation_score: float = 0.0
 
 
 @dataclass

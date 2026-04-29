@@ -91,7 +91,7 @@ class OpenAIProvider(BaseVLMProvider):
                 model=self._model,
                 instructions=SYSTEM_PROMPT_STRUCTURED if gradcam_available else system_prompt,
                 input=[{"role": "user", "content": content}],
-                max_output_tokens=2000,
+                max_output_tokens=4000,
                 temperature=0.3,
                 text=response_format,
             )
@@ -125,7 +125,7 @@ class OpenAIProvider(BaseVLMProvider):
                             ],
                         },
                     ],
-                    max_output_tokens=2000,
+                    max_output_tokens=4000,
                     temperature=0.3,
                     text=response_format,
                 )

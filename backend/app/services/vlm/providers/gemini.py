@@ -82,7 +82,7 @@ class GeminiProvider(BaseVLMProvider):
                 system_instruction=(
                     SYSTEM_PROMPT_STRUCTURED if gradcam_available else system_prompt
                 ),
-                max_output_tokens=2000,
+                max_output_tokens=4000,
                 temperature=0.3,
                 response_mime_type="application/json",
                 response_schema=gemini_response_schema(),
