@@ -15,12 +15,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 
 RUN pip install --upgrade pip && \
-    # Install CPU-only torch first to avoid the 2.4GB CUDA wheel
+    # Single resolve so CPU torch (with the +cpu local version, which PEP 440
+    # ranks higher than the plain GPU wheel) wins for both direct and
+    # transitive resolutions. A second pip-install pass with --prefix
+    # doesn't see the first prefix on sys.path and re-resolves torch from
+    # PyPI, which pulls in 2.7 GB of nvidia-* and 641 MB of triton.
     pip install --prefix=/install --no-cache-dir \
-        torch torchvision \
-        --index-url https://download.pytorch.org/whl/cpu && \
-    # Install everything else (torch already satisfied, pip skips it)
-    pip install --prefix=/install --no-cache-dir -r requirements.txt
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        -r requirements.txt && \
+    # Defensive cleanup in case the resolver ever drifts back to GPU torch,
+    # plus drop the duplicate opencv-python.libs (mediapipe brings in
+    # opencv-contrib-python which already ships the cv2 binaries).
+    rm -rf /install/lib/python3.11/site-packages/nvidia* \
+           /install/lib/python3.11/site-packages/triton* \
+           /install/lib/python3.11/site-packages/opencv_python \
+           /install/lib/python3.11/site-packages/opencv_python.libs \
+           /install/lib/python3.11/site-packages/opencv_python-*.dist-info && \
+    find /install -name __pycache__ -type d -prune -exec rm -rf {} +
 
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
@@ -34,6 +45,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxrender-dev \
     libgl1 \
+    libgles2 \
+    libegl1 \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
